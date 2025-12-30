@@ -1,0 +1,434 @@
+<!doctype HTML>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BattleTime!</title>
+  <style>
+    body{font-family:system-ui,"Segoe UI",Roboto,Helvetica,Arial,monospace;background:#333;padding:20px}
+    #game-container{max-width:800px;margin:0 auto;background:#888;padding:18px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.08)}
+    #output{background:#111;color:#aaa;padding:12px;height:360px;overflow:auto;white-space:pre-wrap;border-radius:6px}
+    #controls,#setup{margin-top:12px}
+    .btn{padding:8px 12px;margin:6px 6px 6px 0;cursor:pointer;border-radius:6px;border:1px solid #ddd;background:#999}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    input[type=number],input[type=text],select{padding:6px;font-size:14px}
+    .statline{font-size:13px;color:#666;margin-top:6px}
+    .enemy-card{display:inline-block;background:#222;border-radius:6px;padding:8px;margin:6px;color:#ddd;border:1px solid #444}
+    .enemy-dead{opacity:.45;text-decoration:line-through}
+    .flex-row{display:flex;gap:8px;flex-wrap:wrap}
+  </style>
+</head>
+<body>
+  <div id="game-container">
+    <h1>BattleTime!</h1>
+    <div id="output">Welcome User.</div>
+
+    <div id="setup">
+      <div><label>Name: <input id="name-input" maxlength="16" value="Player"></label></div>
+      <div style="margin-top:8px"><label>Class:<select id="class-select"><option value="Fighter">Fighter<option value="Mage">Mage</select></label></div>
+      <div style="margin-top:8px"><label>Difficulty (1 = Easy, 5 = Hard): <input id="diff-input" type="number" min="1" max="5" value="3" style="width:60px"></label></div>
+      <div style="margin-top:10px"><button id="start-btn" class="btn">Start Game</button></div>
+      <div class="statline">Tips: When prompted, click move buttons to act. Survive as many rounds as you can. Target enemies when an attack move is selected.</div>
+    </div>
+
+    <div id="controls" style="display:none;margin-top:12px"></div>
+  </div>
+
+  <script>
+  // Bundled JS port of main.py logic using the provided HTML as base
+  const out = document.getElementById('output');
+  const setup = document.getElementById('setup');
+  const controls = document.getElementById('controls');
+  const startBtn = document.getElementById('start-btn');
+
+  const SLEEPER = 800;
+
+  function log(t = '') {
+    out.innerText += t + '\n';
+    out.scrollTop = out.scrollHeight;
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function randint(a, b) {
+    a = Math.ceil(a); b = Math.floor(b);
+    return Math.floor(Math.random() * (b - a + 1)) + a;
+  }
+
+  // Character base matching main.py formulas
+  class Character {
+    constructor(atk, defn, spd, hp, mp, clas, lv, exp) {
+      this.lv = lv;
+      this.exp = exp || 0;
+      this.name = 'Unit';
+      this.statuses = []; // objects {name, dur, pwr (number or fn), type}
+
+      if (clas === 'Fighter') {
+        this.atk = Math.ceil(atk * (5 * (lv / 4)));
+        this.defn = Math.ceil(defn + 3 * lv);
+        this.spd = Math.ceil(Math.max(spd + lv, spd * (lv / 2)));
+        this.hp = Math.ceil(1.5 * hp + lv * 2);
+        this.mp = Math.ceil(mp + 7.5 * lv);
+        this.max_hp = this.hp;
+        this.max_mp = this.mp;
+        this.moves = [
+          { name: 'Slash', dmg: s => randint(s.atk - s.lv, s.atk + s.lv), cost: 0, type: 'atk' },
+          { name: 'Mend', dmg: s => -Math.ceil(s.max_hp / 4), cost: 15, type: 'heal' },
+          { name: 'Wind Step', dmg: s => Math.floor(s.atk + (2 * s.spd)), cost: 15, type: 'atk' },
+          { name: 'Iron Will', effect: { name: 'Shield', dur: 3, pwr: Math.floor(this.defn / 4), type: 'buff' }, cost: 10, type: 'status' },
+          { name: 'Thousand Cuts', dmg: s => randint(s.atk, 3 * s.atk), cost: s => Math.floor(s.mp / 2), type: 'atk' }
+        ];
+      } else { // Mage
+        this.atk = Math.ceil(atk * (4 * (lv / 4)));
+        this.defn = Math.ceil(defn + 2 * lv);
+        this.spd = Math.ceil(spd + lv * 1.5);
+        this.hp = Math.ceil(1.7 * hp + lv);
+        this.mp = Math.ceil(mp + 15 * lv);
+        this.max_hp = this.hp;
+        this.max_mp = this.mp;
+        // Note: effects that depend on level capture lv at construction (like main.py)
+        this.moves = [
+          { name: 'Fireball', dmg: s => randint(s.atk, Math.floor(s.atk * 1.5)), effect: { name: 'Burn', dur: 3, pwr: this.lv, type: 'dot' }, cost: 10, type: 'atk' },
+          { name: 'Arcane Bolt', dmg: s => Math.floor(s.atk * 2), cost: 15, type: 'atk' },
+          { name: 'Freeze', dmg: s => s.atk, effect: { name: 'Stun', dur: 1, pwr: 0, type: 'stun' }, cost: 25, type: 'atk' },
+          { name: 'Mana Drain', dmg: s => s.atk, effect: { name: 'Focus', dur: 2, pwr: 10, type: 'mp_regen' }, cost: 0, type: 'atk' },
+          { name: 'Meteor', dmg: s => randint(3 * s.atk, 4 * s.atk), cost: s => Math.floor(s.max_mp / 2), type: 'atk' }
+        ];
+      }
+    }
+
+    applyStatuses() {
+      // iterate a shallow copy to allow removals
+      for (const st of [...this.statuses]) {
+        if (st.type === 'dot') {
+          const pwr = (typeof st.pwr === 'function') ? st.pwr(this) : st.pwr;
+          this.hp = Math.max(0, this.hp - pwr);
+          log(`[${this.name}] ${st.name} dealt ${pwr} damage!`);
+        } else if (st.type === 'mp_regen') {
+          const pwr = (typeof st.pwr === 'function') ? st.pwr(this) : st.pwr;
+          this.mp = Math.min(this.max_mp, this.mp + pwr);
+          log(`[${this.name}] ${st.name} restored ${pwr} MP!`);
+        }
+        st.dur -= 1;
+        if (st.dur <= 0) {
+          log(`[${this.name}] ${st.name} effect ended.`);
+          const idx = this.statuses.indexOf(st);
+          if (idx >= 0) this.statuses.splice(idx, 1);
+        }
+      }
+    }
+
+    takeDam(baseDamage) {
+      const dodgeCheck = randint(Math.min(this.spd, 100), Math.max(this.spd, 100));
+      if ((this.spd / 2) > dodgeCheck) {
+        return `${this.name} Dodged!`;
+      }
+      const shield = this.statuses.filter(s => s.type === 'buff').reduce((acc, s) => {
+        const val = (typeof s.pwr === 'function') ? s.pwr(this) : s.pwr;
+        return acc + val;
+      }, 0);
+      const actual = Math.max(1, baseDamage - Math.floor(this.defn / 2) - shield);
+      this.hp = Math.max(0, this.hp - actual);
+      return `${this.name} took ${actual} damage!`;
+    }
+  }
+
+  function executeTurn(attacker, defender, move) {
+    const cost = (typeof move.cost === 'function') ? move.cost(attacker) : (move.cost || 0);
+    attacker.mp -= cost;
+    log(`\n${attacker.name} used ${move.name}!`);
+    if (move.type === 'heal') {
+      const amt = Math.abs((typeof move.dmg === 'function') ? move.dmg(attacker) : (move.dmg || 0));
+      attacker.hp = Math.min(attacker.max_hp, attacker.hp + amt);
+      log(`${attacker.name} healed for ${amt} HP!`);
+    } else if (move.type === 'status') {
+      const eff = Object.assign({}, move.effect);
+      // copy effect (if pwr is function or value, keep as-is)
+      attacker.statuses.push(eff);
+      log(`${eff.name} applied to ${attacker.name}!`);
+    } else { // atk
+      const dmg = (typeof move.dmg === 'function') ? move.dmg(attacker) : (move.dmg || 0);
+      log(defender.takeDam(dmg));
+      if (move.effect) {
+        const eff = Object.assign({}, move.effect);
+        defender.statuses.push(eff);
+        log(`${eff.name} applied to ${defender.name}!`);
+      }
+    }
+  }
+
+  class Enemy extends Character {
+    constructor(...args) {
+      super(...args);
+      this.name = `Enemy ${args[5]}`; // will be overwritten by round naming
+    }
+
+    attack() {
+      const affordable = this.moves.filter(mv => {
+        const cost = (typeof mv.cost === 'function') ? mv.cost(this) : (mv.cost || 0);
+        return cost <= this.mp;
+      });
+      if (affordable.length === 0) return this.moves[0];
+
+      // compute weights similarly to python: (est_damage + 1) / (cost + 1)
+      const weights = affordable.map(mv => {
+        const cost = (typeof mv.cost === 'function') ? mv.cost(this) : (mv.cost || 0);
+        let est = 0;
+        try {
+          if ((mv.type || 'atk') === 'atk') {
+            est = (typeof mv.dmg === 'function') ? Math.abs(mv.dmg(this)) : (mv.dmg || 0);
+            est = Math.max(0, est);
+          }
+        } catch (e) {
+          est = 0;
+        }
+        const w = (est + 1) / (cost + 1);
+        return Math.max(w, 0.01);
+      });
+
+      // weighted random choose
+      const sum = weights.reduce((a, b) => a + b, 0);
+      let r = Math.random() * sum;
+      for (let i = 0; i < affordable.length; i++) {
+        r -= weights[i];
+        if (r <= 0) return affordable[i];
+      }
+      return affordable[affordable.length - 1];
+    }
+  }
+
+  class Player extends Character {
+    constructor(...args) {
+      super(...args);
+      this.name = 'You';
+    }
+
+    chooseMove(foes) {
+      // returns a Promise resolving to {move, target}
+      controls.innerHTML = '';
+      const header = document.createElement('div');
+      header.innerText = `--- ${this.name} | HP: ${this.hp}/${this.max_hp} | MP: ${this.mp}/${this.max_mp} ---`;
+      controls.appendChild(header);
+
+      return new Promise(resolve => {
+        const movesDiv = document.createElement('div');
+        movesDiv.className = 'flex-row';
+        controls.appendChild(movesDiv);
+
+        this.moves.forEach((mv, idx) => {
+          const cost = (typeof mv.cost === 'function') ? mv.cost(this) : (mv.cost || 0);
+          const btn = document.createElement('button');
+          btn.className = 'btn';
+          btn.innerText = `${mv.name} (MP:${cost})`;
+          if (this.mp < cost) btn.disabled = true;
+          btn.onclick = () => {
+            // if attack and there are targets, show target choices
+            if ((mv.type === 'atk' || mv.type === undefined) && foes.some(f => f.hp > 0)) {
+              showTargetPicker(foes, selectedTarget => {
+                controls.innerHTML = '';
+                resolve({ move: mv, target: selectedTarget });
+              });
+            } else {
+              // heal/status target self
+              controls.innerHTML = '';
+              resolve({ move: mv, target: this });
+            }
+          };
+          movesDiv.appendChild(btn);
+        });
+
+        // helper: show target picker under moves
+        function showTargetPicker(foes, cb) {
+          const tgtDiv = document.createElement('div');
+          tgtDiv.style.marginTop = '8px';
+          tgtDiv.innerText = 'Choose target:';
+          const list = document.createElement('div');
+          list.className = 'flex-row';
+          foes.filter(f => f.hp > 0).forEach((f, i) => {
+            const b = document.createElement('button');
+            b.className = 'btn';
+            b.innerText = `${f.name} (HP:${f.hp}/${f.max_hp})`;
+            b.onclick = () => cb(f);
+            list.appendChild(b);
+          });
+          if (!foes.some(f => f.hp > 0)) {
+            const p = document.createElement('div');
+            p.innerText = 'No available targets.';
+            tgtDiv.appendChild(p);
+          } else {
+            tgtDiv.appendChild(list);
+          }
+          controls.appendChild(tgtDiv);
+        }
+      });
+    }
+  }
+
+  function generateStats(level, chosenClass='Fighter') {
+    return [ randint(20,40), randint(10,20), randint(10,40), randint(75,100), randint(10,60), chosenClass, level, 0 ];
+  }
+
+  function printFoesStatus(foes) {
+    const alive = foes.filter(f => f.hp > 0);
+    if (alive.length === 0) {
+      log('No enemies remain.');
+      return;
+    }
+    for (const f of alive) {
+      log(`*Enemy: ${f.name} | HP: ${f.hp}/${f.max_hp} | MP: ${f.mp}/${f.max_mp}*`);
+    }
+  }
+
+  // Game state
+  let playerInstance = null;
+  let roundCount = 1;
+
+  async function startGameFlow(playerName, playerClass, diff) {
+    log('\nStarting game...\n');
+    const a = parseInt(diff, 10);
+    const user_lv = Number.isInteger(a) && a >= 1 && a <= 5 ? (6 - a) : 3;
+    const stats = generateStats(user_lv, playerClass);
+    playerInstance = new Player(...stats);
+    playerInstance.name = playerName;
+    log(`Name: ${playerInstance.name} | Class: ${playerClass} | Lv: ${playerInstance.lv}`);
+    log(`Starting HP: ${playerInstance.hp} | MP: ${playerInstance.mp}\n`);
+    await sleep(1000);
+
+    // Main rounds loop
+    while (playerInstance.hp > 0) {
+      // number of foes (at least 1)
+      const num_foes = randint(1, Math.max(2, Math.floor(roundCount / 2)));
+      const foes = [];
+      for (let i = 0; i < num_foes; i++) {
+        const cls = Math.random() < 0.5 ? 'Fighter' : 'Mage';
+        const s = generateStats(roundCount, cls);
+        const foe = new Enemy(...s);
+        foe.name = `Enemy_${roundCount}_${i + 1}`;
+        foes.push(foe);
+      }
+
+      // build turn order: player + foes sorted by spd desc
+      const order = [playerInstance, ...foes].slice().sort((a, b) => b.spd - a.spd);
+
+      if (foes.length === 1) {
+        log(`\n*** ROUND ${roundCount} ***\nAn ${foes[0].name} (Lv.${foes[0].lv}) appeared!`);
+      } else {
+        const names = foes.map(f => `${f.name}(Lv.${f.lv})`).join(', ');
+        log(`\n*** ROUND ${roundCount} ***\nFoes appeared: ${names}`);
+      }
+
+      await sleep(500);
+
+      // Combat loop
+      let idx = 0;
+      while (playerInstance.hp > 0 && foes.some(f => f.hp > 0)) {
+        printFoesStatus(foes);
+
+        // find next alive actor
+        let actor = null;
+        let attempts = 0;
+        while (attempts < order.length) {
+          const candidate = order[idx % order.length];
+          idx += 1;
+          attempts += 1;
+          if (candidate.hp > 0) { actor = candidate; break; }
+        }
+        if (!actor) break;
+
+        // apply statuses on actor
+        actor.applyStatuses();
+
+        if (playerInstance.hp <= 0 || !foes.some(f => f.hp > 0)) break;
+
+        // check stun
+        if (actor.statuses.some(s => s.type === 'stun')) {
+          log(`${actor.name} is stunned and skips their turn!`);
+          await sleep(SLEEPER);
+          continue;
+        }
+
+        if (actor === playerInstance) {
+          // show enemies visually above controls
+          renderEnemyCards(foes);
+          const { move, target } = await playerInstance.chooseMove(foes);
+          executeTurn(playerInstance, target, move);
+          await sleep(500);
+          if (target instanceof Enemy && target.hp <= 0) {
+            log(`${target.name} was defeated!`);
+          }
+        } else {
+          // enemy turn targets the player
+          const mv = actor.attack();
+          executeTurn(actor, playerInstance, mv);
+          await sleep(500);
+          if (playerInstance.hp <= 0) {
+            log(`${playerInstance.name} has been defeated!`);
+            break;
+          }
+        }
+
+        await sleep(SLEEPER);
+        // clear enemy cards (they will be re-rendered next loop if necessary)
+        clearEnemyCards();
+      }
+
+      // end of round handling
+      if (playerInstance.hp > 0) {
+        log('\n--- VICTORY! ---');
+        const h_gain = randint(10 + roundCount, 20 + roundCount);
+        const m_gain = randint(10 + roundCount, 20 + roundCount);
+        playerInstance.hp = Math.min(playerInstance.max_hp, playerInstance.hp + h_gain);
+        playerInstance.mp = Math.min(playerInstance.max_mp, playerInstance.mp + m_gain);
+        log(`Recovered ${h_gain} HP and ${m_gain} MP.`);
+        roundCount += 1;
+        await sleep(SLEEPER * 2);
+      } else {
+        log(`\n---- GAME OVER ----\nSurvived ${roundCount} rounds.`);
+        controls.innerHTML = '';
+        return;
+      }
+    }
+  }
+
+  // Utility UI functions to show enemy cards for target context
+  function renderEnemyCards(foes) {
+    // create a small panel above controls
+    clearEnemyCards();
+    const panel = document.createElement('div');
+    panel.id = 'enemy-panel';
+    panel.className = 'flex-row';
+    panel.style.marginBottom = '8px';
+    foes.forEach(f => {
+      const c = document.createElement('div');
+      c.className = 'enemy-card' + (f.hp <= 0 ? ' enemy-dead' : '');
+      c.innerHTML = `<div><strong>${f.name}</strong></div><div>HP: ${f.hp}/${f.max_hp}</div><div>MP: ${f.mp}/${f.max_mp}</div>`;
+      panel.appendChild(c);
+    });
+    controls.parentNode.insertBefore(panel, controls);
+  }
+  function clearEnemyCards() {
+    const panel = document.getElementById('enemy-panel');
+    if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+  }
+
+  // Start button wiring
+  startBtn.addEventListener('click', async () => {
+    const t = document.getElementById('name-input').value.trim() || 'Player';
+    const e = document.getElementById('class-select').value;
+    const n = document.getElementById('diff-input').value;
+    if (t.length > 16) {
+      alert('Name max 16 characters.');
+      return;
+    }
+    setup.style.display = 'none';
+    controls.style.display = 'block';
+    log(`\nWelcome ${t}.\nGame starting...`);
+    await startGameFlow(t, e, n);
+  });
+
+  // initial prompts in the output area (like original)
+  log('\nInput your name. This may be the last you do so. Choose wisely:');
+  log('(Use the form below, then click Start Game.)');
+  </script>
+</body>
+</html>
